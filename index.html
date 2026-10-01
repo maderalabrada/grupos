@@ -716,15 +716,19 @@
           </div>
           <div class="status-badge" id="roomStatus">—</div>
           <div class="flex-gap" style="margin-left: auto;">
+            <button class="btn btn-warning btn-sm" id="btnCorrectStatus" title="Corregir si el estado está mal (C)">⚡ Corregir estado</button>
             <button class="btn btn-ghost btn-sm" id="btnEditRoom">Editar</button>
             <button class="btn btn-danger btn-sm" id="btnDeleteRoom">Eliminar</button>
           </div>
         </div>
 
         <div class="occupants-section">
-          <h3>Personas en la habitación</h3>
+          <h3>Personas en la habitación · clic en Entregar/Recibir o usa E / R</h3>
           <div class="occupants-grid" id="occupantsGrid"></div>
-          <button class="btn btn-ghost btn-sm" id="btnAddPerson">+ Añadir persona</button>
+          <div class="flex-gap" style="margin-top:0.4rem;flex-wrap:wrap;">
+            <button class="btn btn-ghost btn-sm" id="btnAddPerson">+ Añadir persona</button>
+            <button class="btn btn-ghost btn-sm" id="btnForceReception" title="Marcar llave en recepción sin pasar por una persona">🔑 Forzar → recepción</button>
+          </div>
         </div>
 
         <div class="log-section" style="margin-top: 1.4rem;">
@@ -741,6 +745,7 @@
     <span><kbd class="kbd">P</kbd> Pendientes</span>
     <span><kbd class="kbd">Esc</kbd> Cerrar</span>
     <span><kbd class="kbd">E</kbd> Entregar · <kbd class="kbd">R</kbd> Recibir</span>
+    <span><kbd class="kbd">C</kbd> Corregir estado</span>
     <span><kbd class="kbd">↑</kbd><kbd class="kbd">↓</kbd> Navegar</span>
   </div>
 
@@ -834,6 +839,40 @@
       <div class="modal-footer">
         <button class="btn btn-ghost" data-close="modalPerson">Cancelar</button>
         <button class="btn btn-primary" id="btnSavePerson">Añadir</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal Corregir estado de llave -->
+  <div class="modal-overlay" id="modalCorrect">
+    <div class="modal" role="dialog">
+      <div class="modal-header">
+        <h3>Corregir estado de la llave</h3>
+        <button class="btn btn-ghost btn-sm" data-close="modalCorrect">✕</button>
+      </div>
+      <div class="modal-body">
+        <p style="font-size:0.88rem;color:var(--muted);margin-bottom:1rem;">
+          Usa esto cuando el sistema no coincide con la realidad (se olvidó registrar una entrega o recepción).
+        </p>
+        <div class="form-group">
+          <label for="correctStatus">Estado real ahora *</label>
+          <select id="correctStatus">
+            <option value="in">🔑 Está en recepción</option>
+            <option value="out">🔑 Está con una persona</option>
+          </select>
+        </div>
+        <div class="form-group" id="correctHolderGroup" hidden>
+          <label for="correctHolder">¿Quién la tiene?</label>
+          <select id="correctHolder"></select>
+        </div>
+        <div class="form-group">
+          <label for="correctNote">Nota (opcional)</label>
+          <input type="text" id="correctNote" placeholder="Ej: no se registró ayer, error de turno…" />
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-ghost" data-close="modalCorrect">Cancelar</button>
+        <button class="btn btn-warning" id="btnSaveCorrect">Aplicar corrección</button>
       </div>
     </div>
   </div>
@@ -1149,7 +1188,7 @@
       const person = room.people.find(p => p.id === personId);
       if (!person) return;
       if (room.keyHolderId) {
-        toast('La llave ya está entregada. Primero recíbela.', 'info');
+        toast('La llave ya está entregada. Usa «Corregir estado» si está mal.', 'info');
         return;
       }
       room.keyHolderId = personId;
@@ -1171,7 +1210,7 @@
       const person = room.people.find(p => p.id === personId);
       if (!person) return;
       if (room.keyHolderId !== personId) {
-        toast('Esta persona no tiene la llave.', 'info');
+        toast('Esta persona no tiene la llave. Usa «Corregir estado» si está mal.', 'info');
         return;
       }
       room.keyHolderId = null;
@@ -1185,6 +1224,70 @@
       save();
       renderAll();
       toast(`Llave recibida de ${person.name}`);
+    }
+
+    /** Corrige el estado real sin depender del flujo normal (olvidos / errores de turno) */
+    function applyKeyCorrection(newHolderId, note) {
+      const room = getRoom(state.selected.groupId, state.selected.roomId);
+      if (!room) return;
+      const prev = room.keyHolderId;
+      if (prev === newHolderId) {
+        toast('El estado ya es ese. No hay cambios.', 'info');
+        return;
+      }
+
+      room.logs = room.logs || [];
+      const noteText = (note || '').trim() || 'Corrección manual';
+
+      if (newHolderId) {
+        const person = room.people.find(p => p.id === newHolderId);
+        if (!person) {
+          toast('Persona no encontrada', 'info');
+          return;
+        }
+        room.keyHolderId = newHolderId;
+        room.logs.push({
+          ts: new Date().toISOString(),
+          action: 'deliver',
+          toName: person.name,
+          personId: newHolderId,
+          note: noteText
+        });
+        toast(`Corregido: llave con ${person.name}`);
+      } else {
+        let fromName = '?';
+        if (prev) {
+          const p = room.people.find(x => x.id === prev);
+          fromName = p ? p.name : '?';
+        }
+        room.keyHolderId = null;
+        room.logs.push({
+          ts: new Date().toISOString(),
+          action: 'receive',
+          fromName,
+          personId: prev || null,
+          note: noteText
+        });
+        toast('Corregido: llave en recepción');
+      }
+      save();
+      renderAll();
+    }
+
+    function openCorrectModal() {
+      const room = getRoom(state.selected.groupId, state.selected.roomId);
+      if (!room) return;
+      const statusSel = document.getElementById('correctStatus');
+      const holderSel = document.getElementById('correctHolder');
+      const holderGroup = document.getElementById('correctHolderGroup');
+
+      statusSel.value = room.keyHolderId ? 'out' : 'in';
+      holderGroup.hidden = !room.keyHolderId;
+      holderSel.innerHTML = room.people.map(p =>
+        `<option value="${p.id}" ${p.id === room.keyHolderId ? 'selected' : ''}>${escapeHtml(p.name)}</option>`
+      ).join('') || '<option value="">Sin personas</option>';
+      document.getElementById('correctNote').value = '';
+      openModal('modalCorrect');
     }
 
     // ─── Search ───────────────────────────────────
@@ -1608,6 +1711,49 @@
       toast('Persona añadida');
     });
 
+    // Corregir estado
+    document.getElementById('btnCorrectStatus').addEventListener('click', openCorrectModal);
+
+    document.getElementById('correctStatus').addEventListener('change', () => {
+      const out = document.getElementById('correctStatus').value === 'out';
+      document.getElementById('correctHolderGroup').hidden = !out;
+      if (out) {
+        const room = getRoom(state.selected.groupId, state.selected.roomId);
+        if (room) {
+          document.getElementById('correctHolder').innerHTML = room.people.map(p =>
+            `<option value="${p.id}">${escapeHtml(p.name)}</option>`
+          ).join('') || '<option value="">Sin personas</option>';
+        }
+      }
+    });
+
+    document.getElementById('btnSaveCorrect').addEventListener('click', () => {
+      const status = document.getElementById('correctStatus').value;
+      const note = document.getElementById('correctNote').value;
+      if (status === 'in') {
+        applyKeyCorrection(null, note);
+      } else {
+        const holderId = document.getElementById('correctHolder').value;
+        if (!holderId) {
+          toast('Elige quién tiene la llave', 'info');
+          return;
+        }
+        applyKeyCorrection(holderId, note);
+      }
+      closeModal('modalCorrect');
+    });
+
+    document.getElementById('btnForceReception').addEventListener('click', () => {
+      const room = getRoom(state.selected.groupId, state.selected.roomId);
+      if (!room) return;
+      if (!room.keyHolderId) {
+        toast('La llave ya está en recepción', 'info');
+        return;
+      }
+      if (!confirm('¿Marcar la llave como en recepción? (corrección)')) return;
+      applyKeyCorrection(null, 'Forzado a recepción');
+    });
+
     // Filter
     document.getElementById('btnFilterOut').addEventListener('click', () => {
       state.filterOutOnly = !state.filterOutOnly;
@@ -1690,6 +1836,10 @@
 
       if (e.key === 't' || e.key === 'T') { toggleTheme(); return; }
       if (e.key === 'p' || e.key === 'P') { showSummary(); return; }
+      if (e.key === 'c' || e.key === 'C') {
+        if (state.selected.roomId) { openCorrectModal(); }
+        return;
+      }
 
       const focusedCard = document.activeElement?.closest?.('.person-card');
       if (focusedCard) {
