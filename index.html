@@ -794,6 +794,22 @@
           <label for="roomPeople">Personas (una por línea o separadas por coma)</label>
           <textarea id="roomPeople" rows="4" placeholder="Ana Pérez&#10;Carlos Gómez&#10;Lucía Ruiz"></textarea>
         </div>
+        <div class="form-group">
+          <label for="roomKeyStatus">Estado actual de la llave *</label>
+          <select id="roomKeyStatus">
+            <option value="in">🔑 En recepción (disponible)</option>
+            <option value="out">🔑 Ya entregada / fuera</option>
+          </select>
+        </div>
+        <div class="form-group" id="roomKeyHolderGroup" hidden>
+          <label for="roomKeyHolder">¿Quién tiene la llave ahora?</label>
+          <select id="roomKeyHolder">
+            <option value="">— Elegir persona —</option>
+          </select>
+          <p style="font-size:0.75rem;color:var(--muted);margin-top:0.35rem;">
+            Se rellena con las personas del listado de arriba. Si aún no aparecen, escribe primero los nombres y vuelve a este selector.
+          </p>
+        </div>
       </div>
       <div class="modal-footer">
         <button class="btn btn-ghost" data-close="modalRoom">Cancelar</button>
@@ -1092,6 +1108,7 @@
             : l.action === 'receive'
               ? `Recibida de <strong>${escapeHtml(l.fromName)}</strong>`
               : escapeHtml(l.action);
+          if (l.note) text += ` <span style="color:var(--muted);font-size:0.75rem;">(${escapeHtml(l.note)})</span>`;
           return `
             <div class="log-item">
               <span class="log-time">${formatDate(l.ts)}</span>
@@ -1288,6 +1305,9 @@
         document.getElementById('modalRoomTitle').textContent = 'Nueva habitación';
         document.getElementById('roomName').value = '';
         document.getElementById('roomPeople').value = '';
+        document.getElementById('roomKeyStatus').value = 'in';
+        document.getElementById('roomKeyHolderGroup').hidden = true;
+        document.getElementById('roomKeyHolder').innerHTML = '<option value="">— Elegir persona —</option>';
         openModal('modalRoom');
         return;
       }
@@ -1416,6 +1436,28 @@
       toast(state.editingGroupId ? 'Grupo actualizado' : 'Grupo creado');
     });
 
+    // Room key status UI helpers
+    function refreshKeyHolderOptions(selectedName) {
+      const peopleNames = document.getElementById('roomPeople').value
+        .split(/[\n,;]+/).map(s => s.trim()).filter(Boolean);
+      const sel = document.getElementById('roomKeyHolder');
+      const prev = selectedName || sel.value;
+      sel.innerHTML = '<option value="">— Elegir persona —</option>' +
+        peopleNames.map(n => `<option value="${escapeHtml(n)}" ${n === prev ? 'selected' : ''}>${escapeHtml(n)}</option>`).join('');
+    }
+
+    document.getElementById('roomKeyStatus').addEventListener('change', () => {
+      const out = document.getElementById('roomKeyStatus').value === 'out';
+      document.getElementById('roomKeyHolderGroup').hidden = !out;
+      if (out) refreshKeyHolderOptions();
+    });
+
+    document.getElementById('roomPeople').addEventListener('input', () => {
+      if (document.getElementById('roomKeyStatus').value === 'out') {
+        refreshKeyHolderOptions();
+      }
+    });
+
     // Room
     document.getElementById('btnSaveRoom').addEventListener('click', () => {
       const name = document.getElementById('roomName').value.trim();
@@ -1426,28 +1468,87 @@
       }
       const peopleNames = document.getElementById('roomPeople').value
         .split(/[\n,;]+/).map(s => s.trim()).filter(Boolean);
+      const keyStatus = document.getElementById('roomKeyStatus').value;
+      const holderName = document.getElementById('roomKeyHolder').value.trim();
+
+      if (keyStatus === 'out') {
+        if (!peopleNames.length) {
+          toast('Indica al menos una persona si la llave está fuera', 'info');
+          return;
+        }
+        if (!holderName || !peopleNames.some(n => n.toLowerCase() === holderName.toLowerCase())) {
+          toast('Elige quién tiene la llave (debe estar en la lista de personas)', 'info');
+          document.getElementById('roomKeyHolder').focus();
+          return;
+        }
+      }
+
       const group = getGroup(state.editingGroupId);
       if (!group) return;
+
+      function resolveHolderId(people) {
+        if (keyStatus !== 'out') return null;
+        const found = people.find(p => p.name.toLowerCase() === holderName.toLowerCase());
+        return found ? found.id : null;
+      }
 
       if (state.editingRoomId) {
         const room = group.rooms.find(r => r.id === state.editingRoomId);
         if (room) {
+          const prevHolder = room.keyHolderId;
           room.name = name;
           const existing = new Map(room.people.map(p => [p.name.toLowerCase(), p]));
           room.people = peopleNames.map(n =>
             existing.get(n.toLowerCase()) || { id: uid(), name: n }
           );
-          if (room.keyHolderId && !room.people.find(p => p.id === room.keyHolderId)) {
-            room.keyHolderId = null;
+          const newHolderId = resolveHolderId(room.people);
+          room.keyHolderId = newHolderId;
+
+          // Log only if status changed
+          if (prevHolder !== newHolderId) {
+            room.logs = room.logs || [];
+            if (newHolderId) {
+              const p = room.people.find(x => x.id === newHolderId);
+              room.logs.push({
+                ts: new Date().toISOString(),
+                action: 'deliver',
+                toName: p ? p.name : holderName,
+                personId: newHolderId,
+                note: 'Estado inicial / corrección'
+              });
+            } else if (prevHolder) {
+              const p = room.people.find(x => x.id === prevHolder) ||
+                [...(room.logs || [])].reverse().find(l => l.personId === prevHolder);
+              room.logs.push({
+                ts: new Date().toISOString(),
+                action: 'receive',
+                fromName: p?.name || p?.toName || '?',
+                personId: prevHolder,
+                note: 'Estado inicial / corrección'
+              });
+            }
           }
         }
       } else {
+        const people = peopleNames.map(n => ({ id: uid(), name: n }));
+        const holderId = resolveHolderId(people);
+        const logs = [];
+        if (holderId) {
+          const p = people.find(x => x.id === holderId);
+          logs.push({
+            ts: new Date().toISOString(),
+            action: 'deliver',
+            toName: p.name,
+            personId: holderId,
+            note: 'Estado al alta'
+          });
+        }
         const newRoom = {
           id: uid(),
           name,
-          people: peopleNames.map(n => ({ id: uid(), name: n })),
-          keyHolderId: null,
-          logs: []
+          people,
+          keyHolderId: holderId,
+          logs
         };
         group.rooms.push(newRoom);
         state.selected = { groupId: group.id, roomId: newRoom.id };
@@ -1467,6 +1568,16 @@
       document.getElementById('modalRoomTitle').textContent = 'Editar habitación';
       document.getElementById('roomName').value = room.name;
       document.getElementById('roomPeople').value = room.people.map(p => p.name).join('\n');
+      if (room.keyHolderId) {
+        const holder = room.people.find(p => p.id === room.keyHolderId);
+        document.getElementById('roomKeyStatus').value = 'out';
+        document.getElementById('roomKeyHolderGroup').hidden = false;
+        refreshKeyHolderOptions(holder ? holder.name : '');
+      } else {
+        document.getElementById('roomKeyStatus').value = 'in';
+        document.getElementById('roomKeyHolderGroup').hidden = true;
+        document.getElementById('roomKeyHolder').innerHTML = '<option value="">— Elegir persona —</option>';
+      }
       openModal('modalRoom');
     });
 
