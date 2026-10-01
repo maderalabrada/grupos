@@ -670,7 +670,8 @@
       <button class="btn btn-ghost btn-sm" id="btnSummary" title="Resumen de llaves fuera">📋 Pendientes</button>
       <button class="btn btn-ghost btn-sm" id="btnExport" title="Exportar JSON (backup)">JSON</button>
       <button class="btn btn-ghost btn-sm" id="btnExportPdf" title="Exportar registro completo a PDF">PDF</button>
-      <button class="btn btn-ghost btn-sm" id="btnImport" title="Importar JSON">Importar</button>
+      <button class="btn btn-ghost btn-sm" id="btnImport" title="Reemplazar todo con un JSON">Importar</button>
+      <button class="btn btn-ghost btn-sm" id="btnMerge" title="Unir varios JSON de distintas PCs">Unir</button>
       <button class="btn btn-primary" id="btnNewGroup">+ Grupo</button>
     </div>
   </header>
@@ -879,6 +880,7 @@
   </div>
 
   <input type="file" id="importFile" accept=".json" hidden />
+  <input type="file" id="mergeFile" accept=".json" multiple hidden />
   <div class="toast-container" id="toastContainer"></div>
 
   <script>
@@ -2027,19 +2029,223 @@
         try {
           const data = JSON.parse(reader.result);
           if (!Array.isArray(data.groups)) throw new Error('invalid');
-          if (!confirm(`Importar ${data.groups.length} grupos? Se reemplazan los datos actuales.`)) return;
+          if (!confirm(`Importar ${data.groups.length} grupos? Se REEMPLAZAN los datos actuales de esta PC.`)) return;
           state.groups = data.groups;
           state.selected = { groupId: null, roomId: null };
           state.view = 'room';
           save();
           renderAll();
-          toast('Datos importados');
+          toast('Datos importados (reemplazo completo)');
         } catch {
           toast('Archivo inválido', 'info');
         }
       };
       reader.readAsText(file);
       e.target.value = '';
+    });
+
+    // ─── Merge / Unir varios JSON ─────────────────
+    function normName(s) {
+      return (s || '').trim().toLowerCase().replace(/\s+/g, ' ');
+    }
+
+    function logKey(l) {
+      return [l.ts || '', l.action || '', l.personId || '', l.toName || '', l.fromName || '', l.note || ''].join('|');
+    }
+
+    function mergeLogs(a, b) {
+      const map = new Map();
+      for (const l of [...(a || []), ...(b || [])]) {
+        map.set(logKey(l), l);
+      }
+      return [...map.values()].sort((x, y) => (x.ts || '').localeCompare(y.ts || ''));
+    }
+
+    function resolveKeyHolderFromLogs(people, logs) {
+      if (!logs || !logs.length) return null;
+      const sorted = [...logs].sort((a, b) => (a.ts || '').localeCompare(b.ts || ''));
+      let holderId = null;
+      for (const l of sorted) {
+        if (l.action === 'deliver') {
+          if (l.personId && people.some(p => p.id === l.personId)) {
+            holderId = l.personId;
+          } else if (l.toName) {
+            const p = people.find(x => normName(x.name) === normName(l.toName));
+            holderId = p ? p.id : holderId;
+          }
+        } else if (l.action === 'receive') {
+          holderId = null;
+        }
+      }
+      return holderId;
+    }
+
+    function mergePeople(listA, listB) {
+      const byName = new Map();
+      for (const p of [...(listA || []), ...(listB || [])]) {
+        const key = normName(p.name);
+        if (!key) continue;
+        if (!byName.has(key)) {
+          byName.set(key, { id: p.id, name: p.name.trim() });
+        }
+      }
+      return [...byName.values()];
+    }
+
+    function mergeRooms(roomsA, roomsB) {
+      const byName = new Map();
+
+      function ingest(room) {
+        const key = normName(room.name);
+        if (!key) return;
+        if (!byName.has(key)) {
+          byName.set(key, {
+            id: room.id,
+            name: room.name.trim(),
+            people: [...(room.people || [])],
+            logs: [...(room.logs || [])],
+            keyHolderId: room.keyHolderId || null
+          });
+        } else {
+          const cur = byName.get(key);
+          cur.people = mergePeople(cur.people, room.people);
+          cur.logs = mergeLogs(cur.logs, room.logs);
+        }
+      }
+
+      for (const r of roomsA || []) ingest(r);
+      for (const r of roomsB || []) ingest(r);
+
+      // Tras unir logs y personas, el estado de llave = último movimiento
+      return [...byName.values()].map(r => {
+        const people = r.people;
+        // Remap holder ids if people were deduped by name
+        let holderId = resolveKeyHolderFromLogs(people, r.logs);
+        return {
+          id: r.id,
+          name: r.name,
+          people,
+          logs: r.logs,
+          keyHolderId: holderId
+        };
+      });
+    }
+
+    function mergeGroupLists(baseGroups, incomingGroups) {
+      const byName = new Map();
+
+      function ingest(g) {
+        const key = normName(g.name);
+        if (!key) return;
+        if (!byName.has(key)) {
+          byName.set(key, {
+            id: g.id,
+            name: g.name.trim(),
+            from: g.from || null,
+            to: g.to || null,
+            notes: g.notes || null,
+            rooms: [...(g.rooms || [])]
+          });
+        } else {
+          const cur = byName.get(key);
+          // Preferir fechas/notas no vacías
+          if (!cur.from && g.from) cur.from = g.from;
+          if (!cur.to && g.to) cur.to = g.to;
+          if (!cur.notes && g.notes) cur.notes = g.notes;
+          cur.rooms = mergeRooms(cur.rooms, g.rooms);
+        }
+      }
+
+      for (const g of baseGroups || []) ingest(g);
+      for (const g of incomingGroups || []) ingest(g);
+
+      // Asegurar merge de rooms también en el primer ingest path
+      return [...byName.values()].map(g => ({
+        ...g,
+        rooms: mergeRooms(g.rooms, []) // normaliza holders
+      }));
+    }
+
+    function mergeDataIntoState(incomingGroups) {
+      // Primera pasada: unir por nombre de grupo
+      const resultMap = new Map();
+
+      function addGroups(groups) {
+        for (const g of groups || []) {
+          const key = normName(g.name);
+          if (!key) continue;
+          if (!resultMap.has(key)) {
+            resultMap.set(key, JSON.parse(JSON.stringify(g)));
+          } else {
+            const cur = resultMap.get(key);
+            if (!cur.from && g.from) cur.from = g.from;
+            if (!cur.to && g.to) cur.to = g.to;
+            if (!cur.notes && g.notes) cur.notes = g.notes;
+            cur.rooms = mergeRooms(cur.rooms, g.rooms);
+          }
+        }
+      }
+
+      addGroups(state.groups);
+      addGroups(incomingGroups);
+
+      state.groups = [...resultMap.values()].map(g => ({
+        id: g.id,
+        name: g.name,
+        from: g.from || null,
+        to: g.to || null,
+        notes: g.notes || null,
+        rooms: mergeRooms(g.rooms, [])
+      }));
+    }
+
+    function readJsonFile(file) {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => {
+          try {
+            const data = JSON.parse(reader.result);
+            if (!Array.isArray(data.groups)) reject(new Error('Sin groups'));
+            else resolve(data.groups);
+          } catch (err) {
+            reject(err);
+          }
+        };
+        reader.onerror = () => reject(reader.error);
+        reader.readAsText(file);
+      });
+    }
+
+    document.getElementById('btnMerge').addEventListener('click', () => {
+      document.getElementById('mergeFile').click();
+    });
+
+    document.getElementById('mergeFile').addEventListener('change', async (e) => {
+      const files = [...(e.target.files || [])];
+      e.target.value = '';
+      if (!files.length) return;
+
+      try {
+        const allIncoming = [];
+        for (const f of files) {
+          const groups = await readJsonFile(f);
+          allIncoming.push(...groups);
+        }
+
+        const beforeRooms = state.groups.reduce((n, g) => n + g.rooms.length, 0);
+        mergeDataIntoState(allIncoming);
+        const afterRooms = state.groups.reduce((n, g) => n + g.rooms.length, 0);
+
+        state.selected = { groupId: null, roomId: null };
+        state.view = 'room';
+        save();
+        renderAll();
+        toast(
+          `Unidos ${files.length} archivo(s): ${state.groups.length} grupos, ${afterRooms} hab. (antes ${beforeRooms})`
+        );
+      } catch {
+        toast('Error al unir: algún archivo no es válido', 'info');
+      }
     });
 
     // Keyboard
