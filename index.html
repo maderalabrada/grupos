@@ -668,7 +668,8 @@
       <span class="offline-badge" id="offlineBadge" title="Estado de conexión">● Online</span>
       <button class="btn btn-ghost btn-sm" id="btnTheme" title="Cambiar tema (T)">☀</button>
       <button class="btn btn-ghost btn-sm" id="btnSummary" title="Resumen de llaves fuera">📋 Pendientes</button>
-      <button class="btn btn-ghost btn-sm" id="btnExport" title="Exportar JSON">Exportar</button>
+      <button class="btn btn-ghost btn-sm" id="btnExport" title="Exportar JSON (backup)">JSON</button>
+      <button class="btn btn-ghost btn-sm" id="btnExportPdf" title="Exportar registro completo a PDF">PDF</button>
       <button class="btn btn-ghost btn-sm" id="btnImport" title="Importar JSON">Importar</button>
       <button class="btn btn-primary" id="btnNewGroup">+ Grupo</button>
     </div>
@@ -1783,8 +1784,224 @@
       a.href = URL.createObjectURL(blob);
       a.download = `llaves-grupos-${new Date().toISOString().slice(0, 10)}.json`;
       a.click();
-      toast('Datos exportados');
+      toast('JSON exportado (backup)');
     });
+
+    function buildPdfReportHtml() {
+      const now = new Date();
+      const generated = now.toLocaleString('es', {
+        dateStyle: 'full',
+        timeStyle: 'short'
+      });
+
+      let totalRooms = 0;
+      let keysOut = 0;
+      let keysIn = 0;
+      for (const g of state.groups) {
+        for (const r of g.rooms) {
+          totalRooms++;
+          if (r.keyHolderId) keysOut++;
+          else keysIn++;
+        }
+      }
+
+      let body = '';
+      if (!state.groups.length) {
+        body = '<p class="muted">No hay grupos registrados.</p>';
+      } else {
+        const sorted = [...state.groups].sort((a, b) => (a.name || '').localeCompare(b.name || '', 'es'));
+        for (const g of sorted) {
+          const dates = [g.from, g.to].filter(Boolean).join(' → ') || 'Sin fechas';
+          body += `
+            <section class="group">
+              <h2>${escapeHtml(g.name)}</h2>
+              <p class="meta">Fechas: ${escapeHtml(dates)}${g.notes ? ' · ' + escapeHtml(g.notes) : ''}</p>
+          `;
+          if (!g.rooms.length) {
+            body += '<p class="muted">Sin habitaciones.</p>';
+          } else {
+            for (const r of g.rooms) {
+              const holder = r.keyHolderId
+                ? (r.people.find(p => p.id === r.keyHolderId)?.name || '?')
+                : null;
+              const statusLabel = holder
+                ? `🔑 FUERA — con ${escapeHtml(holder)}`
+                : '🔑 EN RECEPCIÓN';
+              const statusClass = holder ? 'out' : 'in';
+              const people = r.people.length
+                ? r.people.map(p => escapeHtml(p.name) + (p.id === r.keyHolderId ? ' 🔑' : '')).join(', ')
+                : '—';
+
+              body += `
+                <div class="room">
+                  <div class="room-head">
+                    <strong>${escapeHtml(r.name)}</strong>
+                    <span class="badge ${statusClass}">${statusLabel}</span>
+                  </div>
+                  <p class="people"><span class="label">Personas:</span> ${people}</p>
+              `;
+
+              const logs = [...(r.logs || [])].reverse();
+              if (logs.length) {
+                body += '<table><thead><tr><th>Fecha / hora</th><th>Movimiento</th><th>Nota</th></tr></thead><tbody>';
+                for (const l of logs) {
+                  const when = formatDate(l.ts);
+                  let mov = '';
+                  if (l.action === 'deliver') mov = `Entregada a ${escapeHtml(l.toName || '')}`;
+                  else if (l.action === 'receive') mov = `Recibida de ${escapeHtml(l.fromName || '')}`;
+                  else mov = escapeHtml(l.action || '');
+                  body += `<tr>
+                    <td class="mono">${when}</td>
+                    <td>${mov}</td>
+                    <td class="muted">${escapeHtml(l.note || '')}</td>
+                  </tr>`;
+                }
+                body += '</tbody></table>';
+              } else {
+                body += '<p class="muted small">Sin movimientos registrados.</p>';
+              }
+              body += '</div>';
+            }
+          }
+          body += '</section>';
+        }
+      }
+
+      return `<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <title>Registro de llaves — ${escapeHtml(now.toISOString().slice(0, 10))}</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      font-size: 11pt;
+      color: #111;
+      line-height: 1.4;
+      padding: 18mm 16mm;
+      max-width: 210mm;
+      margin: 0 auto;
+    }
+    h1 { font-size: 16pt; margin-bottom: 4px; }
+    .subtitle { color: #555; font-size: 10pt; margin-bottom: 14px; }
+    .summary {
+      display: flex; gap: 18px; flex-wrap: wrap;
+      background: #f4f4f5; border: 1px solid #ddd;
+      padding: 10px 14px; border-radius: 6px; margin-bottom: 18px;
+      font-size: 10pt;
+    }
+    .summary strong { color: #111; }
+    section.group {
+      break-inside: avoid;
+      margin-bottom: 20px;
+      border-top: 2px solid #222;
+      padding-top: 10px;
+    }
+    section.group h2 { font-size: 13pt; margin-bottom: 2px; }
+    .meta { color: #555; font-size: 9.5pt; margin-bottom: 10px; }
+    .room {
+      border: 1px solid #ddd;
+      border-radius: 6px;
+      padding: 8px 10px;
+      margin-bottom: 10px;
+      break-inside: avoid;
+    }
+    .room-head {
+      display: flex; justify-content: space-between; align-items: center;
+      gap: 8px; margin-bottom: 4px; flex-wrap: wrap;
+    }
+    .badge {
+      font-size: 9pt; font-weight: 600;
+      padding: 2px 8px; border-radius: 999px;
+    }
+    .badge.out { background: #fef3c7; color: #92400e; }
+    .badge.in { background: #dcfce7; color: #166534; }
+    .people { font-size: 10pt; margin-bottom: 6px; }
+    .label { color: #555; }
+    table {
+      width: 100%; border-collapse: collapse;
+      font-size: 9pt; margin-top: 4px;
+    }
+    th, td {
+      border: 1px solid #e5e5e5;
+      padding: 4px 6px;
+      text-align: left;
+      vertical-align: top;
+    }
+    th { background: #f4f4f5; font-weight: 600; }
+    .mono { font-family: Consolas, monospace; white-space: nowrap; }
+    .muted { color: #666; }
+    .small { font-size: 9pt; }
+    .footer {
+      margin-top: 24px; padding-top: 10px;
+      border-top: 1px solid #ccc;
+      font-size: 9pt; color: #666;
+    }
+    @media print {
+      body { padding: 10mm; }
+      .no-print { display: none !important; }
+      a { color: inherit; text-decoration: none; }
+    }
+    .toolbar {
+      position: sticky; top: 0; background: #fff;
+      border-bottom: 1px solid #ddd;
+      padding: 10px 0; margin-bottom: 16px;
+      display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
+    }
+    .toolbar button {
+      font-size: 12pt; padding: 8px 16px; cursor: pointer;
+      background: #2563eb; color: #fff; border: none; border-radius: 6px;
+    }
+    .toolbar button.secondary {
+      background: #e5e7eb; color: #111;
+    }
+    .toolbar span { font-size: 10pt; color: #555; }
+  </style>
+</head>
+<body>
+  <div class="toolbar no-print">
+    <button onclick="window.print()">🖨 Imprimir / Guardar como PDF</button>
+    <button class="secondary" onclick="window.close()">Cerrar</button>
+    <span>En el diálogo de impresión elige «Guardar como PDF» o «Microsoft Print to PDF».</span>
+  </div>
+
+  <h1>Registro de llaves — Grupos de promociones</h1>
+  <p class="subtitle">Generado: ${escapeHtml(generated)}</p>
+
+  <div class="summary">
+    <div><strong>${state.groups.length}</strong> grupos</div>
+    <div><strong>${totalRooms}</strong> habitaciones</div>
+    <div><strong>${keysOut}</strong> llaves fuera</div>
+    <div><strong>${keysIn}</strong> llaves en recepción</div>
+  </div>
+
+  ${body}
+
+  <div class="footer">
+    Documento generado desde Gestión de Llaves · Solo para uso interno del hotel.
+  </div>
+</body>
+</html>`;
+    }
+
+    document.getElementById('btnExportPdf').addEventListener('click', () => {
+      if (!state.groups.length) {
+        toast('No hay datos para exportar', 'info');
+        return;
+      }
+      const html = buildPdfReportHtml();
+      const win = window.open('', '_blank');
+      if (!win) {
+        toast('Permite ventanas emergentes para exportar el PDF', 'info');
+        return;
+      }
+      win.document.open();
+      win.document.write(html);
+      win.document.close();
+      toast('Informe abierto — usa Imprimir → Guardar como PDF');
+    });
+
     document.getElementById('btnImport').addEventListener('click', () => {
       document.getElementById('importFile').click();
     });
