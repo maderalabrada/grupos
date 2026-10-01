@@ -716,19 +716,19 @@
             <div class="group-name" id="roomGroupName">—</div>
           </div>
           <div class="status-badge" id="roomStatus">—</div>
-          <div class="flex-gap" style="margin-left: auto;">
-            <button class="btn btn-warning btn-sm" id="btnCorrectStatus" title="Corregir si el estado está mal (C)">⚡ Corregir estado</button>
+          <div class="flex-gap" style="margin-left: auto; flex-wrap: wrap;">
+            <button class="btn btn-success btn-sm" id="btnForceReception" title="Un clic: llave en recepción">🔑 → Recepción</button>
+            <button class="btn btn-ghost btn-sm" id="btnCorrectStatus" title="Poner llave con otra persona (C)">Corregir…</button>
             <button class="btn btn-ghost btn-sm" id="btnEditRoom">Editar</button>
             <button class="btn btn-danger btn-sm" id="btnDeleteRoom">Eliminar</button>
           </div>
         </div>
 
         <div class="occupants-section">
-          <h3>Personas en la habitación · clic en Entregar/Recibir o usa E / R</h3>
+          <h3>Personas · cualquier miembro puede entregar o devolver la llave</h3>
           <div class="occupants-grid" id="occupantsGrid"></div>
           <div class="flex-gap" style="margin-top:0.4rem;flex-wrap:wrap;">
             <button class="btn btn-ghost btn-sm" id="btnAddPerson">+ Añadir persona</button>
-            <button class="btn btn-ghost btn-sm" id="btnForceReception" title="Marcar llave en recepción sin pasar por una persona">🔑 Forzar → recepción</button>
           </div>
         </div>
 
@@ -1120,16 +1120,19 @@
       if (!room.people.length) {
         grid.innerHTML = '<p style="color:var(--muted);font-size:0.88rem;">Sin personas asignadas</p>';
       } else {
+        const keyIsOut = !!room.keyHolderId;
         grid.innerHTML = room.people.map(p => {
           const hasKey = room.keyHolderId === p.id;
+          // Cualquier miembro puede devolver la llave si está fuera;
+          // cualquiera puede recibirla si está en recepción.
+          const actionBtn = keyIsOut
+            ? `<button class="btn btn-success btn-sm" data-action="receive-key" data-person="${p.id}" title="Cualquier miembro puede devolver la llave">Recibir de esta persona</button>`
+            : `<button class="btn btn-warning btn-sm" data-action="deliver-key" data-person="${p.id}">Entregar a esta persona</button>`;
           return `
             <div class="person-card ${hasKey ? 'has-key' : ''}" data-person="${p.id}" tabindex="0">
               <div class="person-name">${escapeHtml(p.name)}${hasKey ? ' · 🔑' : ''}</div>
               <div class="person-actions">
-                ${hasKey
-                  ? `<button class="btn btn-success btn-sm" data-action="receive-key" data-person="${p.id}">Recibir</button>`
-                  : `<button class="btn btn-warning btn-sm" data-action="deliver-key" data-person="${p.id}">Entregar</button>`
-                }
+                ${actionBtn}
                 <button class="btn btn-ghost btn-sm" data-action="remove-person" data-person="${p.id}">✕</button>
               </div>
             </div>
@@ -1189,7 +1192,7 @@
       const person = room.people.find(p => p.id === personId);
       if (!person) return;
       if (room.keyHolderId) {
-        toast('La llave ya está entregada. Usa «Corregir estado» si está mal.', 'info');
+        toast('La llave ya está fuera. Primero recíbela de cualquier miembro, o usa «→ Recepción».', 'info');
         return;
       }
       room.keyHolderId = personId;
@@ -1205,22 +1208,33 @@
       toast(`Llave entregada a ${person.name}`);
     }
 
+    /**
+     * Cualquier persona registrada en la habitación puede devolver la llave,
+     * no solo quien figura como titular actual.
+     */
     function receiveKey(personId) {
       const room = getRoom(state.selected.groupId, state.selected.roomId);
       if (!room) return;
       const person = room.people.find(p => p.id === personId);
       if (!person) return;
-      if (room.keyHolderId !== personId) {
-        toast('Esta persona no tiene la llave. Usa «Corregir estado» si está mal.', 'info');
+      if (!room.keyHolderId) {
+        toast('La llave ya está en recepción.', 'info');
         return;
       }
+
+      const previousHolder = room.people.find(p => p.id === room.keyHolderId);
+      const note = previousHolder && previousHolder.id !== personId
+        ? `Devolvió ${person.name} (antes figuraba con ${previousHolder.name})`
+        : undefined;
+
       room.keyHolderId = null;
       room.logs = room.logs || [];
       room.logs.push({
         ts: new Date().toISOString(),
         action: 'receive',
         fromName: person.name,
-        personId
+        personId,
+        note
       });
       save();
       renderAll();
@@ -1744,6 +1758,7 @@
       closeModal('modalCorrect');
     });
 
+    // Un clic → llave en recepción (sin confirmación para agilidad)
     document.getElementById('btnForceReception').addEventListener('click', () => {
       const room = getRoom(state.selected.groupId, state.selected.roomId);
       if (!room) return;
@@ -1751,8 +1766,7 @@
         toast('La llave ya está en recepción', 'info');
         return;
       }
-      if (!confirm('¿Marcar la llave como en recepción? (corrección)')) return;
-      applyKeyCorrection(null, 'Forzado a recepción');
+      applyKeyCorrection(null, 'Marcada en recepción');
     });
 
     // Filter
@@ -2084,7 +2098,9 @@
         const room = getRoom(state.selected.groupId, state.selected.roomId);
         if (!room) return;
         e.preventDefault();
-        if (room.keyHolderId === personId) receiveKey(personId);
+        // Si la llave está fuera → cualquier miembro puede devolverla
+        // Si está en recepción → entregar a esta persona
+        if (room.keyHolderId) receiveKey(personId);
         else deliverKey(personId);
       }
     });
